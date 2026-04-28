@@ -30,8 +30,8 @@ def get_all_students():
     return response.data
 
 
-def create_student(new_name, face_embedding=None, voice_embedding=None):
-    data = {'name':new_name, 'face_embedding':face_embedding, 'voice_embedding':voice_embedding}
+def create_student(new_name,reg_no, face_embedding=None, voice_embedding=None):
+    data = {'name':new_name, 'face_embedding':face_embedding, 'voice_embedding':voice_embedding,'reg_no':reg_no}
     response = supabase.table('students').insert(data).execute()
     return response.data
 
@@ -79,5 +79,13 @@ def create_attendance(logs):
     return response.data
 
 def get_attendance_for_teacher(teacher_id):
-    response = supabase.table('attendance_logs').select("*, subjects!inner(*)").eq("subjects.teacher_id",teacher_id).execute()
-    return response.data
+    roster_resp = supabase.table('subject_students').select("""
+            subject_id, 
+            subjects!inner(name, subject_code), 
+            students!inner(reg_no, name, student_id)
+        """).eq("subjects.teacher_id", teacher_id).execute()
+    
+    # Fetch Logs: Get all attendance records
+    logs_resp = supabase.table('attendance_logs').select("*, students(reg_no, name)").execute()
+        
+    return roster_resp.data, logs_resp.data

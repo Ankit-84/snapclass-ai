@@ -70,101 +70,177 @@ def teacher_dashboard():
     if st.session_state.current_teacher_tab == 'manage_subjects':
         techer_tab_manage_subjects()
     if st.session_state.current_teacher_tab == 'attendance_records':
-        techer_tab_attendance_records()
+        teacher_tab_attendance_records()
 
 
     footer_dashboard()
 
 def techer_tab_take_attendance():
     teacher_id = st.session_state.teacher_data['teacher_id']
-    st.header('Take AI Attendance')
+    st.header('📸 Take Attendance')
 
+    # --- 1. SESSION STATE SETUP ---
     if 'attendance_images' not in st.session_state:
         st.session_state.attendance_images = []
 
+    # --- 2. DATA FETCHING ---
     subjects = get_teacher_subjects(teacher_id)
 
     if not subjects:
-        st.warning("You haven't  created any subjects yet please create one to begin!")
+        st.warning("🚀 You haven't created any subjects yet. Please create one to begin!")
         return
     
-    subject_options = {f"{s['name']}- {s['subject_code']}": s['subject_id'] for s in subjects}
+    subject_options = {f"{s['name']} ({s['subject_code']})": s['subject_id'] for s in subjects}
 
-    col1, col2 = st.columns([3,1], vertical_alignment='bottom')
-
+    # --- 3. TOP SELECTION BAR ---
+    col1, col2 = st.columns([3, 1], vertical_alignment='bottom')
     with col1:
-        selected_subject_label = st.selectbox('Select Subject',options=list(subject_options.keys()))
-
+        selected_subject_label = st.selectbox('Select Subject', options=list(subject_options.keys()))
     with col2:
-        if st.button('Add Photos', type='primary', icon=':material/photo_prints:', width='stretch'):
+        # This button triggers the photo upload dialog
+        if st.button('Add Photos', type='primary', icon=':material/add_a_photo:', use_container_width=True):
             add_photos_dialog()
 
     selected_subject_id = subject_options[selected_subject_label]
-
     st.divider()
 
-    if st.session_state.attendance_images:
-        st.header('Added Photos')
-        gallery_cols = st.columns(4)
+    # --- 4. MODE TABS ---
+    tab_ai, tab_manual, tab_voice = st.tabs(["🤖 AI Face Recognition", "✍️ Manual Register", "🎤 Voice ID"])
 
-        for idx, img in enumerate(st.session_state.attendance_images):
-            with gallery_cols[idx%4]:
-                st.image(img, width='stretch',caption=f'Photo {idx+1}')
-
-    has_photos = bool(st.session_state.attendance_images)
-    c1, c2, c3 = st.columns(3)
-
-    with c1:
-        if st.button('Clear all photos',width='stretch',type='tertiary',icon=':material/delete:' , disabled=not has_photos):
-            st.session_state.attendance_images = []
-            st.rerun()
-
-    with c2:
-        
-        if st.button('Run Face Analysis',width='stretch',type='secondary',icon=':material/analytics:',disabled= not has_photos):
-            all_detected_ids = {}
-
+    # --- 5. AI MODE LOGIC ---
+    with tab_ai:
+        if st.session_state.attendance_images:
+            st.subheader('🖼️ Uploaded Session Photos')
+            gallery_cols = st.columns(4)
             for idx, img in enumerate(st.session_state.attendance_images):
-                img_np = np.array(img.convert('RGB'))
-                detected, _,_ = predict_attendance(img_np)
+                with gallery_cols[idx % 4]:
+                    st.image(img, use_container_width=True, caption=f'Photo {idx+1}')
 
-                if detected:
-                    for sid in detected.keys():
-                        student_id = int(sid)
-                        all_detected_ids.setdefault(student_id,[]).append((f"Photo {idx+1}"))
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                if st.button('Clear Photos', type='secondary', icon=':material/delete:', use_container_width=True):
+                    st.session_state.attendance_images = []
+                    st.rerun()
+            with c2:
+                if st.button('Run AI Analysis', type='primary', icon=':material/analytics:', use_container_width=True):
+                    all_detected_ids = {}
+                    with st.spinner("AI is analyzing faces..."):
+                        for idx, img in enumerate(st.session_state.attendance_images):
+                            img_np = np.array(img.convert('RGB'))
+                            detected, _, _ = predict_attendance(img_np)
+                            if detected:
+                                for sid in detected.keys():
+                                    student_id = int(sid)
+                                    all_detected_ids.setdefault(student_id, []).append(f"Photo {idx+1}")
 
-            enrolled_res = supabase.table('subject_students').select("*,students(*)").eq('subject_id',selected_subject_id).execute()
+                    # Process Results
+                    enrolled_res = supabase.table('subject_students').select("*,students(*)").eq('subject_id', selected_subject_id).execute()
+                    enrolled_students = enrolled_res.data
+
+                    if not enrolled_students:
+                        st.error('❌ No students enrolled in this course.')
+                    else:
+                        results, attendance_to_log = [], []
+                        current_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+                        for node in enrolled_students:
+                            student = node['students']
+                            sources = all_detected_ids.get(int(student['student_id']), [])
+                            is_present = len(sources) > 0
+
+                            results.append({
+                                "Name": student['name'],
+                                "Roll No": student['reg_no'],
+                                "Source": ", ".join(sources) if is_present else "-",
+                                "Status": "✅ Present" if is_present else "❌ Absent"
+                            })
+                            attendance_to_log.append({
+                                'student_id': student['student_id'],
+                                'subject_id': selected_subject_id,
+                                'timestamp': current_ts,
+                                'is_present': bool(is_present)
+                            })
+                        attendance_result_dialog(pd.DataFrame(results), attendance_to_log)
+        else:
+            st.info("💡 Pro Tip: Upload group photos of the class using the 'Add Photos' button above to use AI detection.")
+
+    # --- 6. MANUAL MODE LOGIC (NEW) ---
+    with tab_manual:
+        st.subheader("✍️ Manual Attendance Sheet")
+        
+        # Fetch Enrollment specifically for manual mode
+        with st.spinner('Fetching student list...'):
+            enrolled_res = supabase.table('subject_students').select("*,students(*)").eq('subject_id', selected_subject_id).execute()
             enrolled_students = enrolled_res.data
 
-            if not enrolled_students:
-                st.warning('No students enrolled in this course')
-            else:
-                results ,attendance_to_log = [], []
+        if not enrolled_students:
+            st.warning('No students found for this subject.')
+        else:
+            # Prepare and Sort Data
+            manual_list = []
+            for node in enrolled_students:
+                s = node['students']
+                manual_list.append({
+                    "student_id": s['student_id'],
+                    "Reg No": s['reg_no'],
+                    "Student Name": s['name'],
+                    "Present": True  # Defaulting to true for faster marking
+                })
+            
+            # Sort Reg No in increasing order
+            df_manual = pd.DataFrame(manual_list).sort_values(by="Reg No")
 
-                current_timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            # Attractive Data Editor
+            st.write("Toggle the status for each student:")
+            edited_df = st.data_editor(
+                df_manual,
+                column_config={
+                    "Present": st.column_config.CheckboxColumn(
+                        "Attendance",
+                        help="Select to mark present (🔵 Blue Tick)",
+                        default=True,
+                    ),
+                    "student_id": None, # Hide backend ID
+                    "Reg No": st.column_config.TextColumn("Registration No", disabled=True),
+                    "Student Name": st.column_config.TextColumn("Student Name", disabled=True),
+                },
+                disabled=["Reg No", "Student Name"],
+                hide_index=True,
+                use_container_width=True,
+                key="manual_attendance_editor"
+            )
 
-                for node in enrolled_students:
-                    student = node['students']
-                    sources = all_detected_ids.get(int(student['student_id']),[])
-                    is_present = len(sources)>0
+            # Manual Submit
+            if st.button("Save Manual Attendance", type="primary", use_container_width=True, icon=":material/done_all:"):
+                current_ts = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+                
+                # Ensure these names match what is passed to the dialog below
+                final_logs = []
+                final_summary = []
 
-                    results.append({
-                        "Name": student['name'],
-                        "ID": student['student_id'],
-                        "Source": ", ".join(sources) if is_present else "-",
-                        "Status" : "✅ Present" if is_present else "❌ Absent"
+                for _, row in edited_df.iterrows():
+                    final_logs.append({
+                        'student_id': row['student_id'],
+                        'subject_id': selected_subject_id,
+                        'timestamp': current_ts,
+                        'is_present': row['Present']
+                    })
+                    
+                    final_summary.append({
+                        "Name": row['Student Name'],
+                        "Roll No": row['Reg No'],
+                        "Source": "Manual Entry",
+                        "Status": "✅ Present" if row['Present'] else "❌ Absent"
                     })
 
-                    attendance_to_log.append({
-                        'student_id': student['student_id'],
-                        'subject_id' : selected_subject_id,
-                        'timestamp': current_timestamp,
-                        'is_present': bool(is_present)
-                    })
+                # Both variables now match the lists created above
+                attendance_result_dialog(pd.DataFrame(final_summary), final_logs)
 
-            attendance_result_dialog(pd.DataFrame(results),attendance_to_log)
-    with c3:
-        if st.button('Use Voice Attendance',type='primary',width='stretch',icon=':material/mic:'):
+    # --- 7. VOICE MODE LOGIC ---
+    with tab_voice:
+        st.subheader("🎤 Voice Verification")
+        st.write("Use the microphone for secure, dual-factor attendance.")
+        if st.button('Open Voice Portal', type='primary', use_container_width=True, icon=':material/settings_voice:'):
             voice_attendance_dialog(selected_subject_id)
 
 def techer_tab_manage_subjects():
@@ -179,75 +255,134 @@ def techer_tab_manage_subjects():
 
     #List all subjects
     subjects = get_teacher_subjects(teacher_id)
-    if subjects:
-        for sub in subjects:
-             stats = [
-                 ("👥","Students",sub['total_students']),
-                 ("🕓","Classes",sub['total_classes']),
-             ]
-        def share_btn():
-            if st.button(f"Share Code: {sub['name']}",key=f"share_{sub['subject_code']}",icon=":material/share:"):
-                share_subject_dialog(sub['name'],sub['subject_code'])
-
-            st.space()
-        
-        subject_card(
-            name = sub['name'],
-            code = sub['subject_code'],
-            section = sub['section'],
-            stats = stats,
-            footer_callback = share_btn
-        )
-    else:
-        st.info("NO SUBJECTS FOUND. CREATE ONE ABOVE")
-
-
-
-def techer_tab_attendance_records():
-    
-    st.header('Attendance Records')
-
-    teacher_id = st.session_state.teacher_data['teacher_id']
-
-    records = get_attendance_for_teacher(teacher_id)
-
-    if not records:
+    if not subjects:
+        st.info("✨ No subjects found. Let's create your first one above!")
         return
+    cols = st.columns(2)
+    for index, sub in enumerate(subjects):
+            with cols[index % 2]:
+                stats = [
+                    ("👥","Students",sub['total_students']),
+                    ("🕓","Classes",sub['total_classes']),
+                ]
+                def share_btn():
+                    if st.button(f"Share Code: {sub['name']}",key=f"share_{sub['subject_code']}",icon=":material/share:"):
+                        share_subject_dialog(sub['name'],sub['subject_code'])
+
+                    st.space()
+                subject_card(
+                    name = sub['name'],
+                    code = sub['subject_code'],
+                    section = sub['section'],
+                    stats = stats,
+                    footer_callback = share_btn
+                )
+
+
+def teacher_tab_attendance_records():
+    st.header('Attendance Records')
+    teacher_id = st.session_state.teacher_data['teacher_id']
     
-    data = []
-
-    for r in records:
-        ts = r.get('timestamp')
-
-        data.append({
-            "ts_group": ts.split(".")[0] if ts else None,
-            "Time": datetime.fromisoformat(ts).strftime("%Y-%m-%d %I:%M %p") if ts else "N'A",
-            "Subject": r['subjects']['name'],
-            "Subject Code": r['subjects']['subject_code'],
-            "is_present": bool(r.get('is_present',False))
-        })
-
-    df = pd.DataFrame(data)
-
-    summary = (
-        df.groupby(['ts_group','Time','Subject','Subject Code'])
-        .agg(
-            Present_Count = ('is_present','sum'),
-            Total_Count = ('is_present','count')
-        ).reset_index()
-
-    )
-
-    summary['Attendance Stats'] = (
-        ""+summary['Present_Count'].astype(str)+" /"
-        + summary['Total_Count'].astype(str) + ' Students'
-    )
-
-    display_df = (summary.sort_values(by='ts_group',ascending=False)
-                  [['Time','Subject','Subject Code','Attendance Stats']])
+    roster_data, logs_data = get_attendance_for_teacher(teacher_id)
     
-    st.dataframe(display_df,width='stretch',hide_index=True)
+    if not roster_data:
+        st.info("👋 No students assigned to your subjects yet.")
+        return
 
+    # Process Roster
+    roster_list = [{
+        "subject_id": item['subject_id'],
+        "Subject": item['subjects']['name'],
+        "reg_no": item['students']['reg_no'],
+        "student_name": item['students']['name'],
+        "student_id": item['students']['student_id']
+    } for item in roster_data]
+    df_roster = pd.DataFrame(roster_list)
+
+    # UI Selection
+    subject_names = sorted(df_roster['Subject'].unique())
+    selected_sub = st.selectbox("📚 Select Subject", subject_names)
+    
+    current_roster = df_roster[df_roster['Subject'] == selected_sub]
+    selected_sub_id = current_roster['subject_id'].iloc[0]
+    
+    df_logs = pd.DataFrame(logs_data)
+    if not df_logs.empty:
+        df_logs = df_logs[df_logs['subject_id'] == selected_sub_id]
+
+    tab1, tab2 = st.tabs(["🕒 Session Records", "📈 Student Performance"])
+
+    # --- TAB 1: DATE & TIME (BLUE STATUS) ---
+    with tab1:
+        if df_logs.empty:
+            st.warning("No attendance sessions recorded.")
+        else:
+            df_logs['dt_obj'] = pd.to_datetime(df_logs['timestamp'])
+            df_logs['Session Label'] = df_logs['dt_obj'].dt.strftime("%b %d, %Y — %I:%M %p")
+            
+            session_options = df_logs.sort_values('dt_obj', ascending=False)['Session Label'].unique()
+            selected_session = st.selectbox("📅 Select Session", session_options)
+            
+            session_logs = df_logs[df_logs['Session Label'] == selected_session]
+            p_count = session_logs['is_present'].sum()
+            t_count = len(current_roster)
+            
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Present", f"{p_count}")
+            col2.metric("Absent", f"{t_count - p_count}")
+            col3.metric("Attendance", f"{(p_count/t_count*100):.1f}%")
+
+            date_view = pd.merge(
+                current_roster[['reg_no', 'student_name', 'student_id']],
+                session_logs[['student_id', 'is_present']],
+                on='student_id', how='left'
+            ).fillna(False)
+            
+            # Use Blue Checkbox emoji for Present, White for Absent
+            date_view['Status'] = date_view['is_present'].map({True: "🟦 Present", False: "⬜ Absent"})
+
+            st.dataframe(
+                date_view.sort_values(by='reg_no')[['reg_no', 'student_name', 'Status']],
+                column_config={"reg_no": "Roll No", "student_name": "Name"},
+                use_container_width=True, hide_index=True
+            )
+
+    # --- TAB 2: TOTAL PERFORMANCE (WITH TOTAL CLASSES) ---
+    with tab2:
+        if df_logs.empty:
+            st.write("No summary available.")
+        else:
+            # Calculate total sessions held for this subject
+            total_sessions = df_logs['timestamp'].nunique()
+            
+            # Count presence per student
+            stats = df_logs.groupby('student_id')['is_present'].sum().reset_index()
+            
+            summary = pd.merge(
+                current_roster[['reg_no', 'student_name', 'student_id']],
+                stats, on='student_id', how='left'
+            ).fillna(0)
+            
+            summary['Total Classes'] = total_sessions
+            summary['Percentage'] = (summary['is_present'] / total_sessions * 100).round(1) if total_sessions > 0 else 0
+            
+            
+            st.dataframe(
+                summary.sort_values(by='reg_no')[['reg_no', 'student_name', 'is_present', 'Total Classes', 'Percentage']],
+                column_config={
+                    "reg_no": "Roll No",
+                    "student_name": "Student Name",
+                    "is_present": "Classes Attended",
+                    "Total Classes": "Total Classes",
+                    "Percentage": st.column_config.ProgressColumn(
+                        "Attendance %",
+                        format="%.1f%%",
+                        min_value=0, max_value=100,
+                    ),
+                },
+                use_container_width=True, 
+                hide_index=True
+            )
 
 def login_teacher(username,password):
     if not username or not password:
